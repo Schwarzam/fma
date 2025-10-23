@@ -23,9 +23,9 @@ from tqdm import tqdm
 import random
 
 # Import from previous steps
-from step1_define_modalities import MyImage, MyTimeSeries, MyScalar, MyTabular, BaseModality
-from step3_implement_codecs import ImageCodec, TimeSeriesCodec, ScalarCodec, TabularCodec
-from step4_codec_manager import CodecManager
+from core.define_modalities import MyImage, MyTimeSeries, MyScalar, MyTabular, BaseModality
+from core.implement_codecs import ImageCodec, TimeSeriesCodec, ScalarCodec, TabularCodec
+from core.codec_manager import CodecManager
 
 
 # ============================================================================

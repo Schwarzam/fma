@@ -22,8 +22,8 @@ from astronomical_codecs import (
     GalaxyImageCodec, GaiaSpectrumCodec, ZTFLightCurveCodec,
     RedshiftCodec, StellarMassCodec, StarFormationRateCodec
 )
-from step4_codec_manager import CodecManager, MODALITY_CODEC_MAPPING
-from step6_train_transformer import MultimodalTransformer
+from core.codec_manager import CodecManager, MODALITY_CODEC_MAPPING
+from core.train_transformer import MultimodalTransformer
 
 
 # -----------------------------------------------------------------------------

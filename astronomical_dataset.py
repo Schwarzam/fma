@@ -14,7 +14,7 @@ from typing import ClassVar
 from jaxtyping import Float, Bool
 from torch import Tensor
 
-from step1_define_modalities import BaseModality
+from core.define_modalities import BaseModality
 
 
 # ============================================================================

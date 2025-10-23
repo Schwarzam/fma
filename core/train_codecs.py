@@ -26,8 +26,8 @@ from typing import Optional
 from tqdm import tqdm
 
 # Import from previous steps
-from step1_define_modalities import MyImage, MyTimeSeries, MyScalar, MyTabular
-from step3_implement_codecs import ImageCodec, TimeSeriesCodec, ScalarCodec, TabularCodec
+from core.define_modalities import MyImage, MyTimeSeries, MyScalar, MyTabular
+from core.implement_codecs import ImageCodec, TimeSeriesCodec, ScalarCodec, TabularCodec
 
 
 # ============================================================================

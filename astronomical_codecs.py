@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 from typing import Type
 
-from step3_implement_codecs import Codec, SimpleImageEncoder, SimpleImageDecoder
-from step3_implement_codecs import TimeSeriesEncoder, TimeSeriesDecoder
-from step2_define_quantizers import FiniteScalarQuantizer, VectorQuantizer, ScalarLinearQuantizer
+from core.implement_codecs import Codec, SimpleImageEncoder, SimpleImageDecoder
+from core.implement_codecs import TimeSeriesEncoder, TimeSeriesDecoder
+from core.define_quantizers import FiniteScalarQuantizer, VectorQuantizer, ScalarLinearQuantizer
 from astronomical_dataset import (
     GalaxyImage, GaiaSpectrum, ZTFLightCurve,
     Redshift, StellarMass, StarFormationRate

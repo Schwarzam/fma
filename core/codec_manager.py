@@ -29,8 +29,8 @@ import torch
 import torch.nn as nn
 
 # Import from previous steps (base/example modalities & codecs)
-from step1_define_modalities import BaseModality, MyImage, MyTimeSeries, MyScalar, MyTabular
-from step3_implement_codecs import Codec, ImageCodec, TimeSeriesCodec, ScalarCodec, TabularCodec
+from core.define_modalities import BaseModality, MyImage, MyTimeSeries, MyScalar, MyTabular
+from core.implement_codecs import Codec, ImageCodec, TimeSeriesCodec, ScalarCodec, TabularCodec
 
 # Try to import astronomical modalities/codecs (if present)
 _HAS_ASTRO = False

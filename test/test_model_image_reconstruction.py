@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astronomical_dataset import AstronomicalDataset, collate_astronomical, GalaxyImage
 from torch.utils.data import DataLoader
-from step4_codec_manager import CodecManager
-from step6_train_transformer import MultimodalTransformer
+from core.codec_manager import CodecManager
+from core.train_transformer import MultimodalTransformer
 
 print("=" * 80)
 print("Testing Model's Image Reconstruction Ability")

@@ -22,8 +22,8 @@ from jaxtyping import Float
 from torch import Tensor
 
 # Import from previous steps
-from step1_define_modalities import BaseModality, MyImage, MyTimeSeries, MyScalar, MyTabular
-from step2_define_quantizers import Quantizer, VectorQuantizer, FiniteScalarQuantizer, ScalarLinearQuantizer
+from core.define_modalities import BaseModality, MyImage, MyTimeSeries, MyScalar, MyTabular
+from core.define_quantizers import Quantizer, VectorQuantizer, FiniteScalarQuantizer, ScalarLinearQuantizer
 
 
 # ============================================================================
