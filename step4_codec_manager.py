@@ -138,6 +138,20 @@ class CodecManager:
         kwargs = self.codec_kwargs.get(modality_type, {})
         codec = codec_class(**kwargs).to(self.device).eval()
 
+        # Load trained weights for GalaxyImageCodec
+        if modality_type.__name__ == 'GalaxyImage':
+            import os
+            checkpoint_path = 'image_codec_final.pt'
+            if os.path.exists(checkpoint_path):
+                try:
+                    checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                    codec.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                    print(f"✓ Loaded trained image codec from {checkpoint_path}")
+                except Exception as e:
+                    print(f"⚠ Could not load trained codec: {e}")
+            else:
+                print(f"⚠ Trained codec not found at {checkpoint_path}, using random init")
+
         self._codec_cache[modality_type] = codec
         return codec
 
@@ -255,51 +269,10 @@ class CodecManager:
 
         token_tensor = token_tensor.to(self.device)
 
-        # 2) If we got INT tokens, map to continuous latent (float) first
-        def _is_int_tensor(t: torch.Tensor) -> bool:
-            return t.dtype in (torch.int8, torch.int16, torch.int32, torch.int64)
-
-        z_cont = None
-        if _is_int_tensor(token_tensor):
-            # Preferred helpers (try in order)
-            if hasattr(codec, "tokens_to_continuous") and callable(getattr(codec, "tokens_to_continuous")):
-                z_cont = codec.tokens_to_continuous(token_tensor)
-            elif hasattr(codec, "dequantize") and callable(getattr(codec, "dequantize")):
-                z_cont = codec.dequantize(token_tensor)
-            elif hasattr(codec, "codebook"):
-                # common pattern: nn.Embedding or a lookup module
-                codebook = getattr(codec, "codebook")
-                if callable(codebook):
-                    z_cont = codebook(token_tensor)
-                else:
-                    # nn.Embedding or similar
-                    z_cont = codebook(token_tensor)
-            elif hasattr(codec, "embedding"):
-                emb = getattr(codec, "embedding")
-                z_cont = emb(token_tensor)
-
-            if z_cont is None:
-                # Last resort: cast to float (won't be semantically correct for real codebook models,
-                # but prevents Conv2d dtype crash)
-                z_cont = token_tensor.float()
-
-            token_or_latent = z_cont.to(self.device)
-        else:
-            # Already continuous (float) latent or logits; pass through
-            token_or_latent = token_tensor
-
-        # 3) Run codec's decode. Many codecs accept either token IDs (int) or latents (float)
-        #    Our conversion above ensures we hand it float features when needed.
+        # 2) Call codec.decode() directly - it will handle quantizer decode internally
+        # The Codec base class handles the full pipeline: tokens -> quantizer.decode() -> _decode()
         with torch.no_grad():
-            try:
-                decoded_modality = codec.decode(token_or_latent, **metadata)
-            except TypeError:
-                # Some codecs separate the paths; try private _decode for continuous latents
-                if token_or_latent.dtype.is_floating_point and hasattr(codec, "_decode"):
-                    decoded_modality = codec._decode(token_or_latent, **metadata)
-                else:
-                    # Re-raise if nothing fits
-                    raise
+            decoded_modality = codec.decode(token_tensor, **metadata)
 
         return decoded_modality
 

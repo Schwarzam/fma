@@ -182,6 +182,17 @@ def quick_train():
     print("Initializing codec manager...")
     codec_manager = CodecManager(device=device)
 
+    # Freeze trained image codec
+    print("Configuring image codec...")
+    try:
+        from astronomical_dataset import GalaxyImage
+        image_codec = codec_manager._load_codec(GalaxyImage)
+        for param in image_codec.parameters():
+            param.requires_grad = False
+        print("✓ Image codec frozen for training")
+    except Exception as e:
+        print(f"⚠ Warning: {e}")
+
     # -----------------------------
     # WARM-UP: infer num_tokens dynamically from codecs
     # -----------------------------
@@ -205,8 +216,12 @@ def quick_train():
         }
 
     # Vocab sizes (keep consistent with your codecs)
+    # IMPORTANT: Must match actual quantizer codebook sizes!
+    # - FSQ [8,5,5,5] = 8*5*5*5 = 1000 codes (not 10000!)
+    # - VectorQuantizer with num_embeddings=512 = 512 codes
+    # - ScalarLinearQuantizer with num_bins=256 = 256 codes
     vocab_sizes = {
-        "tok_galaxy_image": 10000,
+        "tok_galaxy_image": 1000,  # Fixed: FSQ [8,5,5,5] = 1000 codes
         "tok_gaia_spectrum": 512,
         "tok_ztf_lightcurve": 512,
         "tok_redshift": 256,
@@ -219,10 +234,10 @@ def quick_train():
     model = MultimodalTransformer(
         vocab_sizes=vocab_sizes,
         num_tokens=inferred_num_tokens,
-        d_model=256,  # Small for demo
-        nhead=4,
-        num_layers=4,
-        dim_feedforward=1024,
+        d_model=512,  # Small for demo
+        nhead=8,
+        num_layers=8,
+        dim_feedforward=2048,
         dropout=0.1
     ).to(device)
 
@@ -233,7 +248,7 @@ def quick_train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     # Training loop
-    num_epochs = 15
+    num_epochs = 5
     print(f"Training for {num_epochs} epochs...")
     print("=" * 80)
 

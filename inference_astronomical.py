@@ -163,10 +163,10 @@ class AstronomicalPredictor:
         self.model = MultimodalTransformer(
             vocab_sizes=vocab_sizes,
             num_tokens=self.num_tokens,
-            d_model=256,
-            nhead=4,
-            num_layers=4,
-            dim_feedforward=1024,
+            d_model=512,       # Updated to match training
+            nhead=8,           # Updated to match training
+            num_layers=8,      # Updated to match training
+            dim_feedforward=2048,  # Updated to match training
             dropout=0.1
         ).to(device)
 
@@ -352,27 +352,69 @@ def example1_predict_scalars_from_image(predictor, dataset):
     print("\nInput: Galaxy Image")
     print(f"  Image shape: {sample['image'].shape}")
 
+    # Collect values for table
+    table_data = []
     if 'redshift' in preds:
         pred_z = preds['redshift'].value.item()
         true_z = sample['redshift'].item()
+        table_data.append(['Redshift', f'{true_z:.3f}', f'{pred_z:.3f}', f'{abs(pred_z - true_z):.3f}'])
         print(f"  Redshift: {pred_z:.3f} (true: {true_z:.3f}, error: {abs(pred_z - true_z):.3f})")
 
     if 'stellar_mass' in preds:
         pred_mass = preds['stellar_mass'].value.item()
         true_mass = sample['stellar_mass'].item()
+        table_data.append(['Stellar Mass [log(M☉)]', f'{true_mass:.2f}', f'{pred_mass:.2f}', f'{abs(pred_mass - true_mass):.2f}'])
         print(f"  Stellar Mass: {pred_mass:.2f} log(M☉) (true: {true_mass:.2f}, error: {abs(pred_mass - true_mass):.2f})")
 
     if 'sfr' in preds:
         pred_sfr = preds['sfr'].value.item()
         true_sfr = sample['sfr'].item()
+        table_data.append(['SFR [M☉/yr]', f'{true_sfr:.1f}', f'{pred_sfr:.1f}', f'{abs(pred_sfr - true_sfr):.1f}'])
         print(f"  SFR: {pred_sfr:.1f} M☉/yr (true: {true_sfr:.1f}, error: {abs(pred_sfr - true_sfr):.1f})")
 
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+    # Create figure with image and table
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Left: Image
     img = sample['image'].permute(1, 2, 0).cpu().numpy()
     img = np.clip(img, 0, 1)
-    ax.imshow(img)
-    ax.set_title("Galaxy Image")
-    ax.axis('off')
+    ax1.imshow(img)
+    ax1.set_title("Input: Galaxy Image", fontsize=14, fontweight='bold')
+    ax1.axis('off')
+
+    # Right: Table
+    ax2.axis('tight')
+    ax2.axis('off')
+
+    # Create table
+    table = ax2.table(
+        cellText=table_data,
+        colLabels=['Property', 'True Value', 'Predicted', 'Absolute Error'],
+        cellLoc='center',
+        loc='center',
+        colWidths=[0.35, 0.2, 0.2, 0.25]
+    )
+
+    # Style the table
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2.5)
+
+    # Color header
+    for i in range(4):
+        table[(0, i)].set_facecolor('#4472C4')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+
+    # Alternate row colors
+    for i in range(1, len(table_data) + 1):
+        for j in range(4):
+            if i % 2 == 0:
+                table[(i, j)].set_facecolor('#E7E6E6')
+            else:
+                table[(i, j)].set_facecolor('#FFFFFF')
+
+    ax2.set_title("Scalar Predictions", fontsize=14, fontweight='bold', pad=20)
+
     plt.tight_layout()
     plt.savefig('prediction_example1_image_to_scalars.png', dpi=150, bbox_inches='tight')
     print("\n✓ Saved visualization: prediction_example1_image_to_scalars.png")
@@ -609,7 +651,7 @@ def main():
     warmup_tokens = _encode_many(codec_manager, batched_modalities)
 
     vocab_sizes = {
-        "tok_galaxy_image": 10000,
+        "tok_galaxy_image": 1000,  # Fixed: FSQ [8,5,5,5] = 1000 codes
         "tok_gaia_spectrum": 512,
         "tok_ztf_lightcurve": 512,
         "tok_redshift": 256,

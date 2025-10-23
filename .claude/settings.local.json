@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/gustavo/miniconda3/bin/python3:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -89,8 +89,14 @@ class Codec(ABC, nn.Module):
         # Encode to continuous
         z_continuous = self._encode(x)
 
-        # Quantize to discrete
-        z_quantized, _, _ = self.quantizer(z_continuous)
+        # Get discrete token indices if quantizer supports it (e.g., VectorQuantizer)
+        # Otherwise use quantized continuous values (e.g., FSQ, ScalarLinearQuantizer)
+        if hasattr(self.quantizer, 'get_indices'):
+            # VectorQuantizer: get discrete indices [batch, spatial...]
+            z_quantized = self.quantizer.get_indices(z_continuous)
+        else:
+            # Other quantizers: use continuous quantized values
+            z_quantized, _, _ = self.quantizer(z_continuous)
 
         # Flatten if needed
         if z_quantized.ndim > 2:

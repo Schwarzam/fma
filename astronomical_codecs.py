@@ -51,16 +51,40 @@ class GalaxyImageCodec(Codec):
 
         z = self.encoder(pixels)
         z = self.projection(z)
+        # Scale up and normalize to [-1, 1] for FSQ
+        # Without training, encoder outputs small values (~0.1)
+        # Scale by 10x then tanh to spread across [-1, 1]
+        z = torch.tanh(z * 10.0)
         return z
 
+    def decode(self, z, **metadata):
+        """
+        Override decode to handle flat token sequence from transformer.
+
+        Transformer outputs [B, 36] but FSQ needs [B, 6, 6] spatial shape.
+        """
+        # If z is flat [B, 36], reshape to [B, 6, 6] for FSQ
+        if z.ndim == 2 and z.shape[1] == 36:
+            B = z.shape[0]
+            z = z.view(B, 6, 6)
+
+        # Now call quantizer.decode to get [B, 4, 6, 6]
+        z_continuous = self.quantizer.decode(z)
+
+        # Call _decode to reconstruct image
+        return self._decode(z_continuous, **metadata)
+
     def _decode(self, z, **metadata):
+        # Handle both [B, 4, H, W] from training and [B, 4, H, W] from quantizer.decode()
+        # The z here should already be [B, 4, H, W] from quantizer.decode()
+        # But just in case it's flat [B, C*H*W], reshape it
         if z.ndim == 2:
             B, N = z.shape
             C = 4
-            assert N % C == 0
+            assert N % C == 0, f"Expected N={N} to be divisible by C={C}"
             HW = N // C
             H = W = int(HW ** 0.5)
-            assert H * W == HW
+            assert H * W == HW, f"Expected perfect square, got HW={HW}"
             z = z.view(B, C, H, W)
 
         z = self.unprojection(z)

@@ -104,6 +104,32 @@ class VectorQuantizer(Quantizer):
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
         self.embedding.weight.data.uniform_(-1.0 / num_embeddings, 1.0 / num_embeddings)
 
+    def get_indices(self, x: Float[Tensor, "batch channels *shape"]) -> Tensor:
+        """
+        Get discrete codebook indices for encoder output.
+
+        Args:
+            x: Encoder output [batch, channels, spatial...]
+
+        Returns:
+            indices: [batch, spatial...] discrete token IDs
+        """
+        # Flatten spatial dimensions
+        batch_size = x.shape[0]
+        x_flat = x.reshape(-1, self.embedding_dim)  # [batch*spatial, dim]
+
+        # Compute distances to all codebook entries
+        distances = torch.cdist(x_flat, self.embedding.weight)  # [batch*spatial, num_embeddings]
+
+        # Find nearest
+        indices = torch.argmin(distances, dim=1)  # [batch*spatial]
+
+        # Reshape to [batch, spatial...]
+        spatial_shape = x.shape[2:]
+        indices = indices.reshape(batch_size, *spatial_shape)
+
+        return indices
+
     def quantize(self, x: Float[Tensor, "batch channels *shape"]) -> Float[Tensor, "batch channels *shape"]:
         """Find nearest codebook entry"""
         # Flatten spatial dimensions
@@ -211,6 +237,36 @@ class FiniteScalarQuantizer(Quantizer):
         x = x * 2.0 - 1.0  # [-1, 1]
         return x
 
+    def get_indices(self, x: Float[Tensor, "batch channels *shape"]) -> Tensor:
+        """
+        Convert quantized levels to flat token indices.
+
+        For levels [8,5,5,5], maps 4D indices to single index in [0, 999].
+        Example: indices [2,3,1,4] -> 2*5*5*5 + 3*5*5 + 1*5 + 4 = 334
+        """
+        # Quantize to discrete levels
+        quantized = self.quantize(x)  # [B, 4, H, W] with values in [0, level-1]
+
+        # Flatten spatial dimensions
+        B, C = quantized.shape[:2]
+        spatial_shape = quantized.shape[2:]
+        quantized_flat = quantized.reshape(B, C, -1)  # [B, 4, H*W]
+
+        # Convert multi-dimensional indices to flat index
+        # For [8,5,5,5]: index = i0*5*5*5 + i1*5*5 + i2*5 + i3
+        multipliers = [1]
+        for level in reversed(self.levels[1:]):
+            multipliers.insert(0, multipliers[0] * level)
+        multipliers = torch.tensor(multipliers, device=x.device).view(C, 1)
+
+        # Compute flat indices
+        flat_indices = (quantized_flat * multipliers).sum(dim=1).long()  # [B, H*W]
+
+        # Reshape to spatial
+        flat_indices = flat_indices.reshape(B, *spatial_shape)
+
+        return flat_indices
+
     def quantize(self, x: Float[Tensor, "batch channels *shape"]) -> Float[Tensor, "batch channels *shape"]:
         """Quantize each channel independently"""
         quantized = torch.zeros_like(x)
@@ -220,12 +276,75 @@ class FiniteScalarQuantizer(Quantizer):
 
         return quantized
 
-    def decode(self, z: Float[Tensor, "batch channels *shape"]) -> Float[Tensor, "batch channels *shape"]:
-        """Dequantize back to continuous"""
-        continuous = torch.zeros_like(z)
+    def indices_to_levels(self, indices: Tensor) -> Tensor:
+        """
+        Convert flat indices back to multi-dimensional levels.
+
+        Args:
+            indices: [B, *spatial] with values in [0, codebook_size-1]
+
+        Returns:
+            levels: [B, num_channels, *spatial] with discrete levels
+        """
+        # Flatten spatial
+        B = indices.shape[0]
+        spatial_shape = indices.shape[1:]
+        indices_flat = indices.reshape(B, -1)  # [B, H*W]
+
+        # Decompose flat index into per-channel indices
+        # For [8,5,5,5]: 334 -> [2,3,1,4]
+        levels_list = []
+        remaining = indices_flat.long()
 
         for i, level in enumerate(self.levels):
-            continuous[:, i] = self._unscale_from_levels(z[:, i], level)
+            if i == 0:
+                # First channel
+                divisor = int(torch.prod(torch.tensor(self.levels[1:])).item())
+                channel_indices = remaining // divisor
+                remaining = remaining % divisor
+            elif i < len(self.levels) - 1:
+                # Middle channels
+                divisor = int(torch.prod(torch.tensor(self.levels[i+1:])).item())
+                channel_indices = remaining // divisor
+                remaining = remaining % divisor
+            else:
+                # Last channel
+                channel_indices = remaining
+
+            levels_list.append(channel_indices)
+
+        # Stack to [B, C, H*W]
+        levels = torch.stack(levels_list, dim=1).float()
+
+        # Reshape to [B, C, *spatial]
+        levels = levels.reshape(B, len(self.levels), *spatial_shape)
+
+        return levels
+
+    def decode(self, z: Float[Tensor, "batch *shape"]) -> Float[Tensor, "batch channels *shape"]:
+        """
+        Dequantize back to continuous.
+
+        Args:
+            z: Can be either:
+               - [B, C, *spatial] discrete levels (old behavior)
+               - [B, *spatial] flat indices (new behavior for transformer)
+
+        Returns:
+            continuous: [B, C, *spatial] continuous values in [-1, 1]
+        """
+        # Check if input is flat indices or multi-channel levels
+        if z.ndim >= 2 and z.shape[1] == len(self.levels):
+            # Old behavior: already has channel dimension [B, 4, H, W]
+            levels = z
+        else:
+            # New behavior: flat indices [B, H, W]
+            levels = self.indices_to_levels(z)
+
+        continuous = torch.zeros_like(levels, dtype=torch.float32)
+
+        for i, level in enumerate(self.levels):
+            continuous[:, i] = self._unscale_from_levels(levels[:, i].float(), level)
 
         return continuous
 
