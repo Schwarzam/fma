@@ -25,7 +25,9 @@ from step1_define_modalities import BaseModality
 class GalaxyImage(BaseModality):
     """Galaxy image (g, r, i bands)"""
     token_key: ClassVar[str] = "tok_galaxy_image"
-    num_tokens: ClassVar[int] = 256  # Will be 14*14*4 = 784 after encoding
+    # NOTE: Keep this in sync with the encoder output length for this modality.
+    # It will be *validated* at runtime by the trainer when building num_tokens dynamically.
+    num_tokens: ClassVar[int] = 256
 
     flux: Float[Tensor, "batch 3 height width"]  # 3 bands
     metadata: dict = None
@@ -39,7 +41,7 @@ class GalaxyImage(BaseModality):
 class GaiaSpectrum(BaseModality):
     """Gaia BP/RP spectrum"""
     token_key: ClassVar[str] = "tok_gaia_spectrum"
-    num_tokens: ClassVar[int] = 128  # Downsampled
+    num_tokens: ClassVar[int] = 128  # Downsampled target length (validated at runtime)
 
     flux: Float[Tensor, "batch wavelength"]
     ivar: Float[Tensor, "batch wavelength"]
@@ -55,7 +57,7 @@ class GaiaSpectrum(BaseModality):
 class ZTFLightCurve(BaseModality):
     """ZTF photometric light curve"""
     token_key: ClassVar[str] = "tok_ztf_lightcurve"
-    num_tokens: ClassVar[int] = 100  # Max 100 observations
+    num_tokens: ClassVar[int] = 100  # Max 100 observations (validated at runtime)
 
     flux: Float[Tensor, "batch time"]
     flux_err: Float[Tensor, "batch time"]
@@ -198,7 +200,7 @@ class AstronomicalDataset(Dataset):
         return {
             'flux': torch.from_numpy(spec_data['flux']).float(),
             'ivar': torch.from_numpy(spec_data['ivar']).float(),
-            'mask': torch.from_numpy(spec_data['mask']),
+            'mask': torch.from_numpy(spec_data['mask']).bool(),
             'wavelength': torch.from_numpy(spec_data['wavelength']).float()
         }
 
@@ -257,19 +259,52 @@ def collate_astronomical(batch):
         for img, sid in zip(images, sample_ids)
     ]
 
-    spectrum_modalities = [
-        GaiaSpectrum(
-            flux=spec['flux'],
-            ivar=spec['ivar'],
-            mask=spec['mask'],
-            wavelength=spec['wavelength'],
-            metadata={}
-        )
-        for spec in spectra
-    ]
+    # For spectra, pad/truncate to FIXED length
+    FIXED_SPEC_LENGTH = 100  # Fixed length for all spectra
 
-    # For light curves, pad to same length
-    max_len = max(lc['flux'].shape[1] for lc in lightcurves)
+    spectrum_modalities = []
+    for spec in spectra:
+        flux = spec['flux']
+        ivar = spec['ivar']
+        mask = spec['mask']
+        wavelength = spec['wavelength']
+
+        # Truncate if too long
+        if flux.shape[1] > FIXED_SPEC_LENGTH:
+            flux = flux[:, :FIXED_SPEC_LENGTH]
+            ivar = ivar[:, :FIXED_SPEC_LENGTH]
+            mask = mask[:, :FIXED_SPEC_LENGTH]
+            wavelength = wavelength[:FIXED_SPEC_LENGTH]
+
+        # Pad if too short
+        elif flux.shape[1] < FIXED_SPEC_LENGTH:
+            pad_len = FIXED_SPEC_LENGTH - flux.shape[1]
+            flux = torch.cat([flux, torch.zeros(1, pad_len)], dim=1)
+            ivar = torch.cat([ivar, torch.zeros(1, pad_len)], dim=1)
+            mask = torch.cat([mask, torch.zeros(1, pad_len, dtype=torch.bool)], dim=1)
+            # Extend wavelength linearly
+            if wavelength.numel() > 1:
+                last_wave = wavelength[-1]
+                step = wavelength[-1] - wavelength[-2]
+                wavelength = torch.cat([wavelength, torch.arange(1, pad_len+1) * step + last_wave])
+            elif wavelength.numel() == 1:
+                last_wave = wavelength[-1]
+                wavelength = torch.cat([wavelength, last_wave + torch.arange(1, pad_len+1)])
+            else:
+                wavelength = torch.arange(FIXED_SPEC_LENGTH).float()
+
+        spectrum_modalities.append(
+            GaiaSpectrum(
+                flux=flux,
+                ivar=ivar,
+                mask=mask,
+                wavelength=wavelength,
+                metadata={}
+            )
+        )
+
+    # For light curves, pad/truncate to FIXED length
+    FIXED_LC_LENGTH = 100  # Fixed length for all light curves
 
     lightcurve_modalities = []
     for lc in lightcurves:
@@ -277,11 +312,18 @@ def collate_astronomical(batch):
         flux_err = lc['flux_err']
         mjd = lc['mjd']
 
-        # Pad
-        if flux.shape[1] < max_len:
-            pad_len = max_len - flux.shape[1]
+        # Truncate if too long
+        if flux.shape[1] > FIXED_LC_LENGTH:
+            flux = flux[:, :FIXED_LC_LENGTH]
+            flux_err = flux_err[:, :FIXED_LC_LENGTH]
+            mjd = mjd[:FIXED_LC_LENGTH]
+
+        # Pad if too short
+        elif flux.shape[1] < FIXED_LC_LENGTH:
+            pad_len = FIXED_LC_LENGTH - flux.shape[1]
             flux = torch.cat([flux, torch.zeros(1, pad_len)], dim=1)
-            flux_err = torch.cat([flux_err, torch.ones(1, pad_len) * 1e10], dim=1)  # High error for padding
+            # Large error for padded points so the model learns to ignore them
+            flux_err = torch.cat([flux_err, torch.ones(1, pad_len) * 1e10], dim=1)
             mjd = torch.cat([mjd, torch.zeros(pad_len)])
 
         lightcurve_modalities.append(

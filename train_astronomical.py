@@ -1,7 +1,10 @@
 """
 train_astronomical.py - Quick training script for astronomical data
 
-Simple example showing how to train on the generated data.
+Simple example showing how to train on the generated data, with:
+- loss computed only on masked positions
+- num_tokens inferred dynamically from codec outputs (warm-up batch)
+- proper per-modality encode calls (no dict passed to CodecManager.encode)
 """
 
 import torch
@@ -30,6 +33,114 @@ MODALITY_CODEC_MAPPING.update({
 })
 
 
+def _masked_cross_entropy(pred, target, mask=None):
+    """
+    pred: (..., V) logits for masked positions (usually [M, V] where M=#masked tokens)
+    target: [B, T] token ids
+    mask:  optional boolean mask [B, T] selecting masked positions
+    """
+    if mask is not None:
+        if mask.dtype != torch.bool:
+            raise ValueError("Expected boolean mask for masked positions.")
+        target = target[mask]  # select masked target positions
+
+    pred_flat = pred.reshape(-1, pred.size(-1))
+    target_flat = target.reshape(-1).long().to(pred.device)
+
+    if pred_flat.size(0) == 0 or target_flat.size(0) == 0:
+        return None, None
+
+    if pred_flat.size(0) != target_flat.size(0):
+        n = min(pred_flat.size(0), target_flat.size(0))
+        pred_flat = pred_flat[:n]
+        target_flat = target_flat[:n]
+
+    loss = F.cross_entropy(pred_flat, target_flat)
+    acc = (pred_flat.argmax(dim=-1) == target_flat).float().mean()
+    return loss, acc
+
+
+def _batch_to_batched_modalities(batch, device):
+    """
+    Concatenate same-modality items and build batched modality objects that
+    the codec_manager can encode in one go per modality.
+    Returns dict[str, BaseModality]
+    """
+    concatenated = {}
+
+    for modality_name, modality_list in batch.items():
+        if modality_name == 'sample_ids':
+            continue
+        if len(modality_list) == 0:
+            continue
+
+        if modality_name == 'galaxy_image':
+            flux = torch.cat([m.flux for m in modality_list], dim=0)
+            concatenated['galaxy_image'] = GalaxyImage(flux=flux.to(device), metadata={})
+
+        elif modality_name == 'gaia_spectrum':
+            flux = torch.cat([m.flux for m in modality_list], dim=0)
+            ivar = torch.cat([m.ivar for m in modality_list], dim=0)
+            mask = torch.cat([m.mask for m in modality_list], dim=0)
+            wavelength = modality_list[0].wavelength.to(device)  # assume same grid after collate
+            concatenated['gaia_spectrum'] = GaiaSpectrum(
+                flux=flux.to(device), ivar=ivar.to(device), mask=mask.to(device),
+                wavelength=wavelength, metadata={}
+            )
+
+        elif modality_name == 'ztf_lightcurve':
+            flux = torch.cat([m.flux for m in modality_list], dim=0)
+            flux_err = torch.cat([m.flux_err for m in modality_list], dim=0)
+            mjd = modality_list[0].mjd.to(device)
+            concatenated['ztf_lightcurve'] = ZTFLightCurve(
+                flux=flux.to(device), flux_err=flux_err.to(device), mjd=mjd, metadata={}
+            )
+
+        elif modality_name == 'redshift':
+            values = torch.cat([m.value for m in modality_list], dim=0)
+            concatenated['redshift'] = Redshift(value=values.to(device), metadata={})
+
+        elif modality_name == 'stellar_mass':
+            values = torch.cat([m.value for m in modality_list], dim=0)
+            concatenated['stellar_mass'] = StellarMass(value=values.to(device), metadata={})
+
+        elif modality_name == 'sfr':
+            values = torch.cat([m.value for m in modality_list], dim=0)
+            concatenated['sfr'] = StarFormationRate(value=values.to(device), metadata={})
+
+    return concatenated
+
+
+def _encode_many(codec_manager, batched_modalities):
+    """
+    Encode a dict of {name: modality_instance} by calling codec_manager.encode per modality.
+    Returns a merged dict {token_key: LongTensor[B, T]}.
+    """
+    tokens = {}
+    for name, modality in batched_modalities.items():
+        out = codec_manager.encode(modality)  # expects a single BaseModality instance
+        if not isinstance(out, dict):
+            raise RuntimeError(f"CodecManager.encode for '{name}' did not return a dict.")
+        tokens.update(out)
+    return tokens
+
+
+def _infer_num_tokens_from_codecs(codec_manager, batched_modalities):
+    """
+    Do one encode pass to discover sequence lengths per token_key.
+    Returns dict: {token_key: T}
+    """
+    with torch.no_grad():
+        tokens = _encode_many(codec_manager, batched_modalities)
+    num_tokens = {}
+    for key, seq in tokens.items():
+        if seq.ndim == 1:
+            num_tokens[key] = 1
+        else:
+            num_tokens[key] = seq.size(1)
+    return num_tokens
+
+
 def quick_train():
     """Quick training example"""
 
@@ -53,7 +164,7 @@ def quick_train():
         batch_size=4,
         shuffle=True,
         collate_fn=collate_astronomical,
-        num_workers=0  # Set to 2-4 for faster loading
+        num_workers=0  # increase (2-4) if I/O bound
     )
 
     val_loader = DataLoader(
@@ -71,8 +182,29 @@ def quick_train():
     print("Initializing codec manager...")
     codec_manager = CodecManager(device=device)
 
-    # Create transformer
-    print("Creating transformer...")
+    # -----------------------------
+    # WARM-UP: infer num_tokens dynamically from codecs
+    # -----------------------------
+    warmup_batch = next(iter(train_loader))
+    batched_modalities = _batch_to_batched_modalities(warmup_batch, device=device)
+
+    try:
+        inferred_num_tokens = _infer_num_tokens_from_codecs(codec_manager, batched_modalities)
+        print("Inferred token lengths per modality (token_key -> T):")
+        for k, v in inferred_num_tokens.items():
+            print(f"  {k}: {v}")
+    except Exception as e:
+        print(f"Warm-up encode failed: {e}")
+        inferred_num_tokens = {
+            GalaxyImage.token_key: GalaxyImage.num_tokens,
+            GaiaSpectrum.token_key: GaiaSpectrum.num_tokens,
+            ZTFLightCurve.token_key: ZTFLightCurve.num_tokens,
+            Redshift.token_key: Redshift.num_tokens,
+            StellarMass.token_key: StellarMass.num_tokens,
+            StarFormationRate.token_key: StarFormationRate.num_tokens,
+        }
+
+    # Vocab sizes (keep consistent with your codecs)
     vocab_sizes = {
         "tok_galaxy_image": 10000,
         "tok_gaia_spectrum": 512,
@@ -82,18 +214,11 @@ def quick_train():
         "tok_sfr": 256,
     }
 
-    num_tokens = {
-        "tok_galaxy_image": 784,
-        "tok_gaia_spectrum": 8000,
-        "tok_ztf_lightcurve": 8000,
-        "tok_redshift": 1,
-        "tok_stellar_mass": 1,
-        "tok_sfr": 1,
-    }
-
+    # Create transformer with inferred token lengths
+    print("Creating transformer...")
     model = MultimodalTransformer(
         vocab_sizes=vocab_sizes,
-        num_tokens=num_tokens,
+        num_tokens=inferred_num_tokens,
         d_model=256,  # Small for demo
         nhead=4,
         num_layers=4,
@@ -108,119 +233,136 @@ def quick_train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     # Training loop
-    num_epochs = 3
+    num_epochs = 15
     print(f"Training for {num_epochs} epochs...")
     print("=" * 80)
 
     for epoch in range(num_epochs):
         model.train()
-        train_loss = 0
-        train_acc = 0
+        train_loss = 0.0
+        train_acc = 0.0
         num_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
 
         for batch in pbar:
             # Encode all modalities with frozen codecs
-            all_tokens = {}
-
             with torch.no_grad():
-                for modality_name, modality_list in batch.items():
-                    if modality_name == 'sample_ids':
-                        continue
+                batched = _batch_to_batched_modalities(batch, device=device)
 
-                    if len(modality_list) == 0:
-                        continue
-
-                    # Concatenate modalities
-                    if modality_name == 'galaxy_image':
-                        flux = torch.cat([m.flux for m in modality_list], dim=0)
-                        batched = GalaxyImage(flux=flux.to(device), metadata={})
-                    elif modality_name == 'gaia_spectrum':
-                        flux = torch.cat([m.flux for m in modality_list], dim=0)
-                        wavelength = modality_list[0].wavelength
-                        mask = torch.cat([m.mask for m in modality_list], dim=0)
-                        batched = GaiaSpectrum(
-                            flux=flux.to(device),
-                            ivar=torch.cat([m.ivar for m in modality_list], dim=0).to(device),
-                            mask=mask.to(device),
-                            wavelength=wavelength.to(device),
-                            metadata={}
-                        )
-                    elif modality_name == 'ztf_lightcurve':
-                        flux = torch.cat([m.flux for m in modality_list], dim=0)
-                        mjd = modality_list[0].mjd
-                        batched = ZTFLightCurve(
-                            flux=flux.to(device),
-                            flux_err=torch.cat([m.flux_err for m in modality_list], dim=0).to(device),
-                            mjd=mjd.to(device),
-                            metadata={}
-                        )
-                    elif modality_name == 'redshift':
-                        values = torch.cat([m.value for m in modality_list], dim=0)
-                        batched = Redshift(value=values.to(device), metadata={})
-                    elif modality_name == 'stellar_mass':
-                        values = torch.cat([m.value for m in modality_list], dim=0)
-                        batched = StellarMass(value=values.to(device), metadata={})
-                    elif modality_name == 'sfr':
-                        values = torch.cat([m.value for m in modality_list], dim=0)
-                        batched = StarFormationRate(value=values.to(device), metadata={})
-                    else:
-                        continue
-
-                    # Encode
-                    try:
-                        tokens = codec_manager.encode(batched)
-                        all_tokens.update(tokens)
-                    except Exception as e:
-                        print(f"Error encoding {modality_name}: {e}")
-                        continue
+                try:
+                    all_tokens = _encode_many(codec_manager, batched)  # {token_key: [B, T]}
+                except Exception as e:
+                    print(f"Error encoding batch: {e}")
+                    continue
 
             if len(all_tokens) < 2:
-                continue  # Need at least 2 modalities
+                # Need at least 2 modalities for cross-modal masking training
+                continue
 
-            # Mask some modalities
-            _, masked = apply_masking(all_tokens, mask_ratio=0.3)
+            # Mask some modalities/tokens
+            all_tokens, masked_raw = apply_masking(all_tokens, mask_ratio=0.3)
 
+            # --- Normalize 'masked' into a dict {key: BoolTensor[B, T]} ---
+            def _normalize_masked(masked, all_tokens):
+                # Case 1: already a dict
+                if isinstance(masked, dict):
+                    return {k: v.bool() for k, v in masked.items()}
+
+                # Case 2: list of keys => whole modality masked (all positions True)
+                if isinstance(masked, list) and (len(masked) == 0 or isinstance(masked[0], str)):
+                    out = {}
+                    for k in masked:
+                        if k in all_tokens:
+                            out[k] = torch.ones_like(all_tokens[k], dtype=torch.bool)
+                    return out
+
+                # Case 3: list of (key, mask) pairs
+                if isinstance(masked, list) and len(masked) > 0 and isinstance(masked[0], (tuple, list)):
+                    out = {}
+                    for item in masked:
+                        if len(item) != 2:
+                            continue
+                        k, m = item
+                        if k in all_tokens:
+                            out[k] = m.bool()
+                    return out
+
+                # Unknown format
+                return {}
+
+            masked = _normalize_masked(masked_raw, all_tokens)
             if len(masked) == 0:
+                # nothing masked this step
                 continue
 
             # Forward pass
             try:
-                predictions = model(all_tokens, masked)
+                preds_raw = model(all_tokens, masked_raw)
 
-                # Compute loss
-                loss = 0
-                acc = 0
+                # --- Normalize 'predictions' to dict {key: logits_for_masked_positions} ---
+                def _normalize_predictions(preds, masked):
+                    # If dict already, just keep the keys that exist in 'masked'
+                    if isinstance(preds, dict):
+                        return {k: v for k, v in preds.items() if k in masked}
+
+                    # If list, align by the iteration order of masked keys
+                    if isinstance(preds, list):
+                        keys = list(masked.keys())
+                        out = {}
+                        for i, p in enumerate(preds):
+                            if i < len(keys):
+                                out[keys[i]] = p
+                        return out
+
+                    # Unknown format
+                    return {}
+
+                predictions = _normalize_predictions(preds_raw, masked)
+
+                loss = 0.0
+                acc = 0.0
                 n = 0
 
-                for key in masked:
-                    if key in predictions and key in all_tokens:
-                        pred = predictions[key]
-                        target = all_tokens[key]
+                for key, mask_pos in masked.items():
+                    if key not in predictions or key not in all_tokens:
+                        continue
 
-                        pred_flat = pred.reshape(-1, pred.size(-1))
-                        target_flat = target.reshape(-1).long()
+                    pred = predictions[key]          # [M, V] (masked positions)
+                    target = all_tokens[key]         # [B, T]
 
-                        loss += F.cross_entropy(pred_flat, target_flat)
-                        acc += (pred.argmax(-1) == target.long()).float().mean()
-                        n += 1
+                    # Sanity checks
+                    if mask_pos.dtype != torch.bool:
+                        mask_pos = mask_pos.bool()
+                    if mask_pos.shape != target.shape:
+                        print(f"Mask/target shape mismatch for {key}: {mask_pos.shape} vs {target.shape}")
+                        continue
 
-                if n > 0:
-                    loss = loss / n
-                    acc = acc / n
+                    out = _masked_cross_entropy(pred, target, mask_pos)
+                    if out is None or out[0] is None:
+                        continue
 
-                    # Backward
-                    optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
+                    l, a = out
+                    loss += l
+                    acc += a
+                    n += 1
 
-                    train_loss += loss.item()
-                    train_acc += acc.item()
-                    num_batches += 1
+                if n == 0:
+                    continue
 
-                    pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{acc.item():.4f}'})
+                loss = loss / n
+                acc = acc / n
+
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+
+                train_loss += loss.item()
+                train_acc += acc.item()
+                num_batches += 1
+
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{acc.item():.4f}'})
 
             except Exception as e:
                 print(f"Error in forward pass: {e}")
