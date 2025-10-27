@@ -1,0 +1,133 @@
+# Codec Configuration File
+# Use this to easily switch between different codec architectures for training and comparison
+
+# Training Configuration
+training:
+  num_epochs: 50
+  batch_size: 8
+  learning_rate: 0.001  # Use decimal notation instead of 1e-3
+  device: cuda
+  gradient_clip: 1.0
+  save_every: 10  # Save checkpoint every N epochs
+  checkpoint_dir: checkpoints/
+
+# Codec Configurations
+codecs:
+  # Simple baseline codec (no pretrained weights)
+  simple:
+    type: simple
+    embedding_dim: 64
+    input_channels: 3
+    output_channels: 3
+
+  # ResNet18 with frozen encoder
+  resnet18_frozen:
+    type: pretrained
+    backbone: resnet18
+    embedding_dim: 64
+    input_channels: 3
+    output_channels: 3
+    freeze_encoder: true
+    pretrained: true
+
+  # ResNet18 with finetunable encoder
+  resnet18_finetune:
+    type: pretrained
+    backbone: resnet18
+    embedding_dim: 64
+    input_channels: 3
+    output_channels: 3
+    freeze_encoder: false
+    pretrained: true
+
+  # ResNet34
+  resnet34:
+    type: pretrained
+    backbone: resnet34
+    embedding_dim: 64
+    input_channels: 3
+    output_channels: 3
+    freeze_encoder: false
+    pretrained: true
+
+  # ResNet50 (larger model)
+  resnet50:
+    type: pretrained
+    backbone: resnet50
+    embedding_dim: 128
+    input_channels: 3
+    output_channels: 3
+    freeze_encoder: false
+    pretrained: true
+
+  # VGG16
+  vgg16:
+    type: pretrained
+    backbone: vgg16
+    embedding_dim: 64
+    input_channels: 3
+    output_channels: 3
+    freeze_encoder: false
+    pretrained: true
+
+  # EfficientNet-B0
+  efficientnet_b0:
+    type: pretrained
+    backbone: efficientnet_b0
+    embedding_dim: 64
+    input_channels: 3
+    output_channels: 3
+    freeze_encoder: false
+    pretrained: true
+
+# Quantizer Configuration
+quantizer:
+  type: fsq  # Options: fsq, vq, none
+  # FSQ settings
+  fsq:
+    levels: [8, 5, 5, 5]  # Total codebook size = 8*5*5*5 = 1000
+  # VQ settings (if using VQ instead)
+  vq:
+    num_embeddings: 512
+    embedding_dim: 64
+    commitment_cost: 0.25
+
+# Loss Configuration
+loss:
+  reconstruction_weight: 1.0
+  quantizer_weight: 0.25
+  perceptual_weight: 0.1  # Only used for image codecs
+  use_perceptual: false  # Set to true to use VGG perceptual loss
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - mse
+    - psnr
+    - ssim
+  num_test_batches: 10
+  save_visualizations: true
+  visualization_samples: 4
+
+# Comparison Configuration
+comparison:
+  # List of codecs to compare (reference codec names above)
+  compare_models:
+    - simple
+    - resnet18_frozen
+    - resnet18_finetune
+    - resnet34
+
+  # Checkpoint paths for trained models (optional)
+  checkpoints:
+    simple: checkpoints/simple_codec_final.pt
+    resnet18_finetune: checkpoints/resnet18_codec_final.pt
+    resnet34: checkpoints/resnet34_codec_final.pt
+
+# Dataset Configuration
+dataset:
+  type: synthetic  # Options: synthetic, astronomical, custom
+  num_train_samples: 1000
+  num_test_samples: 100
+  image_size: 224
+  normalize: true  # Normalize to [-1, 1]
